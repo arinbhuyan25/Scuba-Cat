@@ -1,69 +1,29 @@
 """
 Scuba Cat - Streamlit Web App
-Motion detection triggers the scuba cat video in the browser.
+Motion detection runs in the browser via JS (no click needed).
+When motion is detected, the scuba cat video plays automatically.
 """
 
 import streamlit as st
-import cv2
-import numpy as np
-from pathlib import Path
 import base64
-import time
+from pathlib import Path
 
-# ── Page config ──────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="🐱 Scuba Cat",
-    page_icon="🐱",
-    layout="centered",
-)
+st.set_page_config(page_title="🐱 Scuba Cat", page_icon="🐱", layout="centered")
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def load_video_b64(path: str) -> str:
-    """Return the mp4 file as a base64 data-URI."""
-    with open(path, "rb") as f:
-        data = f.read()
-    return base64.b64encode(data).decode()
-
-
-def motion_percentage(prev_frame, curr_frame, h, w) -> float:
-    """Frame-differencing motion detection (mirrors gesture_detector.py)."""
-    diff = cv2.absdiff(prev_frame, curr_frame)
-    gray = cv2.cvtColor(diff, cv2.COLOR_RGB2GRAY)
-    gray = cv2.GaussianBlur(gray, (5, 5), 0)
-
-    rs, re = int(h * 0.2), int(h * 0.8)
-    cs, ce = int(w * 0.2), int(w * 0.95)
-    roi = gray[rs:re, cs:ce]
-
-    _, thresh = cv2.threshold(roi, 15, 255, cv2.THRESH_BINARY)
-    pixels = cv2.countNonZero(thresh)
-    size = (re - rs) * (ce - cs)
-    return pixels / size if size > 0 else 0.0
-
-
-# ── Session state ─────────────────────────────────────────────────────────────
-for key, default in {
-    "prev_frame": None,
-    "frame_count": 0,
-    "last_trigger": 0.0,
-    "video_triggered": False,
-}.items():
-    if key not in st.session_state:
-        st.session_state[key] = default
-
-REQUIRED_FRAMES = 5
-MOTION_THRESHOLD = 0.01
-COOLDOWN_SECONDS = 4
-
-# ── Video path ────────────────────────────────────────────────────────────────
+# ── Load video as base64 ──────────────────────────────────────────────────────
 VIDEO_PATH = Path(__file__).parent / "scuba_cat.mp4"
-video_b64 = load_video_b64(str(VIDEO_PATH)) if VIDEO_PATH.exists() else None
 
-# ── UI ────────────────────────────────────────────────────────────────────────
+if not VIDEO_PATH.exists():
+    st.error("scuba_cat.mp4 not found next to app.py!")
+    st.stop()
+
+with open(VIDEO_PATH, "rb") as f:
+    video_b64 = base64.b64encode(f.read()).decode()
+
+# ── Main UI ───────────────────────────────────────────────────────────────────
 st.markdown(
     """
-    <h1 style='text-align:center; font-size:2.8rem;'>🐱 Scuba Cat</h1>
+    <h1 style='text-align:center;'>🐱 Scuba Cat</h1>
     <p style='text-align:center; color:gray;'>
         Move your hand in front of the camera — Scuba Cat appears!
     </p>
@@ -71,93 +31,258 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.divider()
+# ── Self-contained HTML/JS component ─────────────────────────────────────────
+html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ background: transparent; font-family: sans-serif; }}
 
-# Video player (hidden until triggered)
-video_placeholder = st.empty()
+  #container {{
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    padding: 10px;
+  }}
 
-if st.session_state["video_triggered"] and video_b64:
-    video_placeholder.markdown(
-        f"""
-        <video autoplay controls style='width:100%; border-radius:12px;'>
-            <source src="data:video/mp4;base64,{video_b64}" type="video/mp4">
-        </video>
-        """,
-        unsafe_allow_html=True,
-    )
-else:
-    video_placeholder.markdown(
-        "<p style='text-align:center; color:#aaa; font-size:1.1rem;'>"
-        "🎬 Video will play here when motion is detected</p>",
-        unsafe_allow_html=True,
-    )
+  #videoBox {{
+    position: relative;
+    width: 100%;
+    max-width: 520px;
+  }}
 
-st.divider()
+  #webcam {{
+    width: 100%;
+    border-radius: 12px;
+    display: block;
+    transform: scaleX(-1);
+  }}
 
-# Camera feed
-col1, col2 = st.columns([3, 1])
+  #overlay {{
+    position: absolute;
+    top: 10px; left: 10px;
+    background: rgba(0,0,0,0.55);
+    color: #fff;
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    pointer-events: none;
+  }}
 
-with col1:
-    camera_image = st.camera_input("📷 Camera feed — move your hand to trigger!", label_visibility="visible")
+  #meterWrap {{
+    width: 100%;
+    max-width: 520px;
+  }}
 
-with col2:
-    st.markdown("### Status")
-    status_box = st.empty()
-    motion_bar_label = st.empty()
-    motion_bar = st.empty()
-    reset_btn = st.button("🔄 Reset", use_container_width=True)
+  #meterLabel {{
+    font-size: 13px;
+    color: #555;
+    margin-bottom: 4px;
+  }}
 
-if reset_btn:
-    st.session_state["video_triggered"] = False
-    st.session_state["prev_frame"] = None
-    st.session_state["frame_count"] = 0
-    st.rerun()
+  #meter {{
+    width: 100%;
+    height: 12px;
+    background: #e0e0e0;
+    border-radius: 6px;
+    overflow: hidden;
+  }}
 
-# ── Motion processing ─────────────────────────────────────────────────────────
-if camera_image is not None:
-    # Decode captured frame
-    file_bytes = np.frombuffer(camera_image.getvalue(), np.uint8)
-    frame = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    h, w = rgb.shape[:2]
+  #meterFill {{
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, #4CAF50, #8BC34A);
+    border-radius: 6px;
+    transition: width 0.1s;
+  }}
 
-    if st.session_state["prev_frame"] is not None:
-        mp = motion_percentage(st.session_state["prev_frame"], rgb, h, w)
+  #catVideo {{
+    display: none;
+    width: 100%;
+    max-width: 520px;
+    border-radius: 12px;
+  }}
 
-        # Update detection counter
-        if mp > MOTION_THRESHOLD:
-            st.session_state["frame_count"] += 1
-        else:
-            st.session_state["frame_count"] = max(0, st.session_state["frame_count"] - 1)
+  #status {{
+    font-size: 15px;
+    font-weight: 600;
+    color: #333;
+  }}
 
-        # Trigger if enough consecutive motion frames & cooldown elapsed
-        now = time.time()
-        if (
-            st.session_state["frame_count"] >= REQUIRED_FRAMES
-            and (now - st.session_state["last_trigger"]) > COOLDOWN_SECONDS
-        ):
-            st.session_state["video_triggered"] = True
-            st.session_state["last_trigger"] = now
-            st.session_state["frame_count"] = 0
-            st.rerun()
+  #resetBtn {{
+    padding: 8px 22px;
+    border: none;
+    border-radius: 8px;
+    background: #f0f0f0;
+    cursor: pointer;
+    font-size: 14px;
+  }}
+  #resetBtn:hover {{ background: #ddd; }}
 
-        # Status display
-        pct = min(st.session_state["frame_count"] / REQUIRED_FRAMES, 1.0)
-        if st.session_state["video_triggered"]:
-            status_box.success("🐱 Scuba Cat!")
-        elif st.session_state["frame_count"] > 0:
-            status_box.warning(f"👋 Detecting… {st.session_state['frame_count']}/{REQUIRED_FRAMES}")
-        else:
-            status_box.info("👀 Watching…")
+  canvas {{ display: none; }}
+</style>
+</head>
+<body>
+<div id="container">
 
-        motion_bar_label.caption(f"Charge: {int(pct*100)}%")
-        motion_bar.progress(pct)
+  <div id="videoBox">
+    <video id="webcam" autoplay playsinline muted></video>
+    <div id="overlay">👀 Watching for motion…</div>
+  </div>
 
-    st.session_state["prev_frame"] = rgb
+  <div id="meterWrap">
+    <div id="meterLabel">Motion charge: 0%</div>
+    <div id="meter"><div id="meterFill"></div></div>
+  </div>
 
-# ── Footer ────────────────────────────────────────────────────────────────────
+  <div id="status">Move your hand to trigger!</div>
+
+  <video id="catVideo" src="data:video/mp4;base64,{video_b64}" controls></video>
+
+  <button id="resetBtn" onclick="resetApp()">🔄 Reset</button>
+
+</div>
+
+<canvas id="canvas"></canvas>
+
+<script>
+const webcam      = document.getElementById('webcam');
+const canvas      = document.getElementById('canvas');
+const ctx         = canvas.getContext('2d');
+const catVideo    = document.getElementById('catVideo');
+const overlay     = document.getElementById('overlay');
+const meterFill   = document.getElementById('meterFill');
+const meterLabel  = document.getElementById('meterLabel');
+const statusEl    = document.getElementById('status');
+
+const MOTION_THRESHOLD  = 0.012;
+const REQUIRED_FRAMES   = 6;
+const COOLDOWN_MS       = 4000;
+const PIXEL_DIFF_THRESH = 20;
+
+let prevData    = null;
+let frameCount  = 0;
+let lastTrigger = 0;
+let triggered   = false;
+
+navigator.mediaDevices.getUserMedia({{ video: true, audio: false }})
+  .then(stream => {{
+    webcam.srcObject = stream;
+    webcam.onloadedmetadata = () => {{
+      canvas.width  = webcam.videoWidth;
+      canvas.height = webcam.videoHeight;
+      requestAnimationFrame(tick);
+    }};
+  }})
+  .catch(err => {{
+    statusEl.textContent = '⚠️ Camera access denied: ' + err.message;
+  }});
+
+function tick() {{
+  if (triggered) {{ requestAnimationFrame(tick); return; }}
+
+  ctx.drawImage(webcam, 0, 0, canvas.width, canvas.height);
+  const frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const data  = frame.data;
+  const w     = canvas.width;
+  const h     = canvas.height;
+
+  if (prevData) {{
+    const rs = Math.floor(h * 0.20), re = Math.floor(h * 0.80);
+    const cs = Math.floor(w * 0.20), ce = Math.floor(w * 0.95);
+    const roiSize = (re - rs) * (ce - cs);
+    let changed = 0;
+
+    for (let y = rs; y < re; y++) {{
+      for (let x = cs; x < ce; x++) {{
+        const i = (y * w + x) * 4;
+        const dr = Math.abs(data[i]   - prevData[i]);
+        const dg = Math.abs(data[i+1] - prevData[i+1]);
+        const db = Math.abs(data[i+2] - prevData[i+2]);
+        if (dr > PIXEL_DIFF_THRESH || dg > PIXEL_DIFF_THRESH || db > PIXEL_DIFF_THRESH) {{
+          changed++;
+        }}
+      }}
+    }}
+
+    const mp  = changed / roiSize;
+    const now = Date.now();
+
+    if (mp > MOTION_THRESHOLD) {{
+      frameCount++;
+    }} else {{
+      frameCount = Math.max(0, frameCount - 1);
+    }}
+
+    const pct = Math.min(frameCount / REQUIRED_FRAMES, 1.0);
+    meterFill.style.width  = (pct * 100) + '%';
+    meterLabel.textContent = 'Motion charge: ' + Math.round(pct * 100) + '%';
+
+    if (frameCount > 0 && frameCount < REQUIRED_FRAMES) {{
+      overlay.textContent  = '👋 Detecting… ' + frameCount + '/' + REQUIRED_FRAMES;
+      statusEl.textContent = 'Keep moving!';
+    }} else if (frameCount === 0) {{
+      overlay.textContent  = '👀 Watching for motion…';
+      statusEl.textContent = 'Move your hand to trigger!';
+    }}
+
+    if (frameCount >= REQUIRED_FRAMES && (now - lastTrigger) > COOLDOWN_MS) {{
+      triggerCat();
+      lastTrigger = now;
+      frameCount  = 0;
+    }}
+  }}
+
+  prevData = new Uint8ClampedArray(data);
+  requestAnimationFrame(tick);
+}}
+
+function triggerCat() {{
+  triggered = true;
+  catVideo.style.display = 'block';
+  catVideo.currentTime   = 0;
+  catVideo.play();
+  overlay.textContent    = '🐱 SCUBA CAT!';
+  statusEl.textContent   = '🐱 Scuba Cat activated!';
+  meterFill.style.width  = '100%';
+  meterFill.style.background = 'linear-gradient(90deg,#ff9800,#f44336)';
+
+  catVideo.onended = () => {{
+    triggered = false;
+    catVideo.style.display = 'none';
+    meterFill.style.background = 'linear-gradient(90deg,#4CAF50,#8BC34A)';
+    statusEl.textContent = 'Move your hand to trigger again!';
+    overlay.textContent  = '👀 Watching for motion…';
+    meterFill.style.width = '0%';
+    meterLabel.textContent = 'Motion charge: 0%';
+  }};
+}}
+
+function resetApp() {{
+  triggered   = false;
+  frameCount  = 0;
+  prevData    = null;
+  catVideo.pause();
+  catVideo.currentTime   = 0;
+  catVideo.style.display = 'none';
+  meterFill.style.width  = '0%';
+  meterFill.style.background = 'linear-gradient(90deg,#4CAF50,#8BC34A)';
+  meterLabel.textContent = 'Motion charge: 0%';
+  overlay.textContent    = '👀 Watching for motion…';
+  statusEl.textContent   = 'Move your hand to trigger!';
+}}
+</script>
+</body>
+</html>
+"""
+
+st.components.v1.html(html, height=720, scrolling=False)
+
 st.markdown(
-    "<br><p style='text-align:center; color:#bbb; font-size:0.8rem;'>"
+    "<p style='text-align:center; color:#bbb; font-size:0.8rem; margin-top:8px;'>"
     "Made with 🐾 for my favourite person</p>",
     unsafe_allow_html=True,
 )
