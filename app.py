@@ -61,6 +61,16 @@ html = f"""
     transform: scaleX(-1);
   }}
 
+  /* Chroma-keyed cat overlaid on the webcam */
+  #catOverlay {{
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    border-radius: 12px;
+    pointer-events: none;
+    transform: scaleX(-1);
+  }}
+
   #overlay {{
     position: absolute;
     top: 10px; left: 10px;
@@ -70,6 +80,7 @@ html = f"""
     border-radius: 8px;
     font-size: 13px;
     pointer-events: none;
+    z-index: 2;
   }}
 
   #meterWrap {{
@@ -99,11 +110,12 @@ html = f"""
     transition: width 0.1s;
   }}
 
+  /* Hidden — used only as the source for chroma-key rendering */
   #catVideo {{
-    display: none;
-    width: 100%;
-    max-width: 520px;
-    border-radius: 12px;
+    position: absolute;
+    width: 1px; height: 1px;
+    opacity: 0;
+    pointer-events: none;
   }}
 
   #status {{
@@ -130,6 +142,7 @@ html = f"""
 
   <div id="videoBox">
     <video id="webcam" autoplay playsinline muted></video>
+    <canvas id="catOverlay"></canvas>
     <div id="overlay">👀 Watching for motion…</div>
   </div>
 
@@ -140,7 +153,7 @@ html = f"""
 
   <div id="status">Move your hand to trigger!</div>
 
-  <video id="catVideo" src="data:video/mp4;base64,{video_b64}" controls></video>
+  <video id="catVideo" src="data:video/mp4;base64,{video_b64}" playsinline></video>
 
   <button id="resetBtn" onclick="resetApp()">🔄 Reset</button>
 
@@ -149,35 +162,43 @@ html = f"""
 <canvas id="canvas"></canvas>
 
 <script>
-const webcam      = document.getElementById('webcam');
-const canvas      = document.getElementById('canvas');
-const ctx         = canvas.getContext('2d');
-const catVideo    = document.getElementById('catVideo');
-const overlay     = document.getElementById('overlay');
-const meterFill   = document.getElementById('meterFill');
-const meterLabel  = document.getElementById('meterLabel');
-const statusEl    = document.getElementById('status');
+const webcam       = document.getElementById('webcam');
+const canvas       = document.getElementById('canvas');
+const ctx          = canvas.getContext('2d');
+const catVideo     = document.getElementById('catVideo');
+const catOverlay   = document.getElementById('catOverlay');
+const catOverCtx   = catOverlay.getContext('2d');
+const overlay      = document.getElementById('overlay');
+const meterFill    = document.getElementById('meterFill');
+const meterLabel   = document.getElementById('meterLabel');
+const statusEl     = document.getElementById('status');
 
-/* ── Tuning knobs (matched to the working Python detector) ── */
-const MOTION_THRESHOLD  = 0.01;    // 1% of ROI pixels must differ (was 1.2%)
-const REQUIRED_FRAMES   = 5;      // consecutive motion frames needed (was 6)
+/* ── Motion-detection tuning ── */
+const MOTION_THRESHOLD  = 0.03;   // 3% of ROI pixels must differ
+const REQUIRED_FRAMES   = 12;    // need ~0.4 s of sustained motion
 const COOLDOWN_MS       = 4000;
-const PIXEL_DIFF_THRESH = 15;     // per-channel difference (was 20)
-const DECAY_DELAY_MS    = 400;    // hold charge for this long after last motion
+const PIXEL_DIFF_THRESH = 25;    // per-channel pixel diff threshold
+const DECAY_DELAY_MS    = 300;   // hold charge briefly after last motion
 
-/* ── Downsample factor for noise reduction ── */
-const DS = 4;                     // compare at 1/4 resolution
+/* ── Downsample factor for motion comparison ── */
+const DS = 4;
 
 let prevSmall      = null;
 let frameCount     = 0;
 let lastTrigger    = 0;
 let lastMotionTime = 0;
 let triggered      = false;
-let prevTime       = 0;           // webcam frame dedup
+let catPlaying     = false;
+let prevTime       = 0;
 
-/* ── Small canvas used for downsampled comparison ── */
+/* ── Offscreen canvases ── */
 const smallCanvas = document.createElement('canvas');
 const smallCtx    = smallCanvas.getContext('2d');
+
+/* Temp canvas for chroma-key processing (half the video res) */
+const tmpCanvas = document.createElement('canvas');
+const tmpCtx    = tmpCanvas.getContext('2d');
+const CK_SCALE  = 0.5;  // render chroma key at half video resolution
 
 navigator.mediaDevices.getUserMedia({{ video: true, audio: false }})
   .then(stream => {{
@@ -185,6 +206,8 @@ navigator.mediaDevices.getUserMedia({{ video: true, audio: false }})
     webcam.onloadedmetadata = () => {{
       canvas.width  = webcam.videoWidth;
       canvas.height = webcam.videoHeight;
+      catOverlay.width  = webcam.videoWidth;
+      catOverlay.height = webcam.videoHeight;
       smallCanvas.width  = Math.floor(webcam.videoWidth  / DS);
       smallCanvas.height = Math.floor(webcam.videoHeight / DS);
       requestAnimationFrame(tick);
@@ -273,18 +296,26 @@ function tick() {{
 }}
 
 function triggerCat() {{
-  triggered = true;
-  catVideo.style.display = 'block';
-  catVideo.currentTime   = 0;
+  triggered  = true;
+  catPlaying = true;
+  catVideo.currentTime = 0;
   catVideo.play();
   overlay.textContent    = '🐱 SCUBA CAT!';
   statusEl.textContent   = '🐱 Scuba Cat activated!';
   meterFill.style.width  = '100%';
   meterFill.style.background = 'linear-gradient(90deg,#ff9800,#f44336)';
 
+  /* Set up the temp canvas once the video dimensions are known */
+  tmpCanvas.width  = Math.round(catVideo.videoWidth  * CK_SCALE);
+  tmpCanvas.height = Math.round(catVideo.videoHeight * CK_SCALE);
+
+  /* Start the chroma-key render loop */
+  requestAnimationFrame(renderChromaKey);
+
   catVideo.onended = () => {{
-    triggered = false;
-    catVideo.style.display = 'none';
+    catPlaying = false;
+    triggered  = false;
+    catOverCtx.clearRect(0, 0, catOverlay.width, catOverlay.height);
     meterFill.style.background = 'linear-gradient(90deg,#4CAF50,#8BC34A)';
     statusEl.textContent = 'Move your hand to trigger again!';
     overlay.textContent  = '👀 Watching for motion…';
@@ -293,13 +324,44 @@ function triggerCat() {{
   }};
 }}
 
+/* ── Chroma-key render loop ─────────────────────────────────────── */
+function renderChromaKey() {{
+  if (!catPlaying) return;
+
+  const tw = tmpCanvas.width;
+  const th = tmpCanvas.height;
+
+  /* Draw the cat video frame at reduced resolution */
+  tmpCtx.drawImage(catVideo, 0, 0, tw, th);
+  const img = tmpCtx.getImageData(0, 0, tw, th);
+  const d   = img.data;
+
+  /* Replace green-screen pixels with transparent */
+  for (let i = 0; i < d.length; i += 4) {{
+    const r = d[i], g = d[i+1], b = d[i+2];
+    if (g > 80 && g > r * 1.3 && g > b * 1.3) {{
+      d[i+3] = 0;  // fully transparent
+    }}
+  }}
+  tmpCtx.putImageData(img, 0, 0);
+
+  /* Composite onto the overlay canvas (sized to match webcam) */
+  const ow = catOverlay.width;
+  const oh = catOverlay.height;
+  catOverCtx.clearRect(0, 0, ow, oh);
+  catOverCtx.drawImage(tmpCanvas, 0, 0, ow, oh);
+
+  requestAnimationFrame(renderChromaKey);
+}}
+
 function resetApp() {{
   triggered   = false;
+  catPlaying  = false;
   frameCount  = 0;
-  prevData    = null;
+  prevSmall   = null;
   catVideo.pause();
-  catVideo.currentTime   = 0;
-  catVideo.style.display = 'none';
+  catVideo.currentTime = 0;
+  catOverCtx.clearRect(0, 0, catOverlay.width, catOverlay.height);
   meterFill.style.width  = '0%';
   meterFill.style.background = 'linear-gradient(90deg,#4CAF50,#8BC34A)';
   meterLabel.textContent = 'Motion charge: 0%';
@@ -311,7 +373,7 @@ function resetApp() {{
 </html>
 """
 
-st.components.v1.html(html, height=720, scrolling=False)
+st.components.v1.html(html, height=620, scrolling=False)
 
 st.markdown(
     "<p style='text-align:center; color:#bbb; font-size:0.8rem; margin-top:8px;'>"
