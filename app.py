@@ -134,7 +134,7 @@ html = f"""
   }}
   #resetBtn:hover {{ background: #ddd; }}
 
-  canvas {{ display: none; }}
+  #canvas {{ display: none; }}
 </style>
 </head>
 <body>
