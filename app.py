@@ -158,15 +158,26 @@ const meterFill   = document.getElementById('meterFill');
 const meterLabel  = document.getElementById('meterLabel');
 const statusEl    = document.getElementById('status');
 
-const MOTION_THRESHOLD  = 0.012;
-const REQUIRED_FRAMES   = 6;
+/* ── Tuning knobs (matched to the working Python detector) ── */
+const MOTION_THRESHOLD  = 0.01;    // 1% of ROI pixels must differ (was 1.2%)
+const REQUIRED_FRAMES   = 5;      // consecutive motion frames needed (was 6)
 const COOLDOWN_MS       = 4000;
-const PIXEL_DIFF_THRESH = 20;
+const PIXEL_DIFF_THRESH = 15;     // per-channel difference (was 20)
+const DECAY_DELAY_MS    = 400;    // hold charge for this long after last motion
 
-let prevData    = null;
-let frameCount  = 0;
-let lastTrigger = 0;
-let triggered   = false;
+/* ── Downsample factor for noise reduction ── */
+const DS = 4;                     // compare at 1/4 resolution
+
+let prevSmall      = null;
+let frameCount     = 0;
+let lastTrigger    = 0;
+let lastMotionTime = 0;
+let triggered      = false;
+let prevTime       = 0;           // webcam frame dedup
+
+/* ── Small canvas used for downsampled comparison ── */
+const smallCanvas = document.createElement('canvas');
+const smallCtx    = smallCanvas.getContext('2d');
 
 navigator.mediaDevices.getUserMedia({{ video: true, audio: false }})
   .then(stream => {{
@@ -174,6 +185,8 @@ navigator.mediaDevices.getUserMedia({{ video: true, audio: false }})
     webcam.onloadedmetadata = () => {{
       canvas.width  = webcam.videoWidth;
       canvas.height = webcam.videoHeight;
+      smallCanvas.width  = Math.floor(webcam.videoWidth  / DS);
+      smallCanvas.height = Math.floor(webcam.videoHeight / DS);
       requestAnimationFrame(tick);
     }};
   }})
@@ -184,24 +197,37 @@ navigator.mediaDevices.getUserMedia({{ video: true, audio: false }})
 function tick() {{
   if (triggered) {{ requestAnimationFrame(tick); return; }}
 
-  ctx.drawImage(webcam, 0, 0, canvas.width, canvas.height);
-  const frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const data  = frame.data;
-  const w     = canvas.width;
-  const h     = canvas.height;
+  /* ── Skip duplicate frames ─────────────────────────────────
+     requestAnimationFrame fires at ~60 fps but the webcam only
+     delivers new frames at ~30 fps.  If we compare an identical
+     frame we get 0 motion and wrongly decrement the counter.
+     We detect duplicates by checking the video's currentTime. */
+  const vt = webcam.currentTime;
+  if (vt === prevTime) {{
+    requestAnimationFrame(tick);
+    return;
+  }}
+  prevTime = vt;
 
-  if (prevData) {{
-    const rs = Math.floor(h * 0.20), re = Math.floor(h * 0.80);
-    const cs = Math.floor(w * 0.20), ce = Math.floor(w * 0.95);
+  /* ── Downsample: draw webcam → small canvas (acts as blur) ── */
+  const sw = smallCanvas.width;
+  const sh = smallCanvas.height;
+  smallCtx.drawImage(webcam, 0, 0, sw, sh);
+  const frame = smallCtx.getImageData(0, 0, sw, sh);
+  const data  = frame.data;
+
+  if (prevSmall) {{
+    const rs = Math.floor(sh * 0.20), re = Math.floor(sh * 0.80);
+    const cs = Math.floor(sw * 0.20), ce = Math.floor(sw * 0.95);
     const roiSize = (re - rs) * (ce - cs);
     let changed = 0;
 
     for (let y = rs; y < re; y++) {{
       for (let x = cs; x < ce; x++) {{
-        const i = (y * w + x) * 4;
-        const dr = Math.abs(data[i]   - prevData[i]);
-        const dg = Math.abs(data[i+1] - prevData[i+1]);
-        const db = Math.abs(data[i+2] - prevData[i+2]);
+        const i = (y * sw + x) * 4;
+        const dr = Math.abs(data[i]   - prevSmall[i]);
+        const dg = Math.abs(data[i+1] - prevSmall[i+1]);
+        const db = Math.abs(data[i+2] - prevSmall[i+2]);
         if (dr > PIXEL_DIFF_THRESH || dg > PIXEL_DIFF_THRESH || db > PIXEL_DIFF_THRESH) {{
           changed++;
         }}
@@ -213,8 +239,14 @@ function tick() {{
 
     if (mp > MOTION_THRESHOLD) {{
       frameCount++;
+      lastMotionTime = now;
     }} else {{
-      frameCount = Math.max(0, frameCount - 1);
+      /* Time-based decay: only drain the meter if no motion
+         has been seen for DECAY_DELAY_MS.  This prevents the
+         charge from bouncing due to brief inter-frame lulls. */
+      if (now - lastMotionTime > DECAY_DELAY_MS) {{
+        frameCount = Math.max(0, frameCount - 1);
+      }}
     }}
 
     const pct = Math.min(frameCount / REQUIRED_FRAMES, 1.0);
@@ -236,7 +268,7 @@ function tick() {{
     }}
   }}
 
-  prevData = new Uint8ClampedArray(data);
+  prevSmall = new Uint8ClampedArray(data);
   requestAnimationFrame(tick);
 }}
 
