@@ -174,11 +174,11 @@ const meterLabel   = document.getElementById('meterLabel');
 const statusEl     = document.getElementById('status');
 
 /* ── Motion-detection tuning ── */
-const MOTION_THRESHOLD  = 0.03;   // 3% of ROI pixels must differ
-const REQUIRED_FRAMES   = 12;    // need ~0.4 s of sustained motion
+const MOTION_THRESHOLD  = 0.08;   // 8% of ROI pixels must differ
+const REQUIRED_FRAMES   = 20;    // need ~0.7 s of sustained motion
 const COOLDOWN_MS       = 4000;
-const PIXEL_DIFF_THRESH = 25;    // per-channel pixel diff threshold
-const DECAY_DELAY_MS    = 300;   // hold charge briefly after last motion
+const PIXEL_DIFF_THRESH = 35;    // per-channel pixel diff threshold
+const DECAY_DELAY_MS    = 150;   // charge drains quickly when motion stops
 
 /* ── Downsample factor for motion comparison ── */
 const DS = 4;
